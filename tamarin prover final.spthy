@@ -1,0 +1,579 @@
+theory ETC
+
+begin
+
+builtins: diffie-hellman, hashing, asymmetric-encryption
+functions: encrypt/2, decrypt/2, generateProof/1, calculateFare/2, subtract/2, hash/1
+
+/*
+2024/12/8
+*/
+
+rule CMSsendMessagetoVehicle:
+  [Fr(~certificate), Fr(~LinkageValue)]
+  --[ CMSMessageSent(~certificate, ~LinkageValue) ]->
+  [Out(<~certificate, ~LinkageValue>),CMSMessageSentComplete(~certificate, ~LinkageValue)]
+/*
+Step 0: CMS 傳送憑證和 LinkageValue 至車輛
+*/
+
+
+rule VehicleReceivedCMSMessage:
+  [In(<~certificate, ~LinkageValue>), Fr(~fingerprint), CMSMessageSentComplete(~certificate, ~LinkageValue)]
+  --[ CMSMessageReceived($Vehicle, ~certificate, ~LinkageValue) ]->
+  [CMSMessageReceivedComplete($Vehicle, ~certificate, ~LinkageValue),Out(~fingerprint)]
+/*
+Step 1a: 車輛接收憑證和 LinkageValue，生成車輛指紋
+*/
+
+
+rule ETCentranceRespondsAuthentication:
+  [Fr(~token), Fr(~nonceETCentrance), CMSMessageReceivedComplete($Vehicle, ~certificate, ~LinkageValue)]
+  --[ TokenIssued(~token, ~nonceETCentrance), Nonce(~nonceETCentrance)]->
+  [Out(~token), Out(~nonceETCentrance), NonceComplete(~nonceETCentrance), TokenIssueComplete(~token, ~nonceETCentrance)]
+/*
+Step 1b: ETC 入口生成 token 和 nonce
+*/
+
+rule NonceInequalityCheck:
+  [ Fr(~nonce1), Fr(~nonce2) ]
+  --[ NonceInequality(~nonce1, ~nonce2) ]->
+  [ Out(~nonce1), Out(~nonce2) ]
+/*
+lemma5
+- 在 Token 和 Nonce 生成後，檢查兩個 Nonce 是否不同。
+- 使用 `NonceInequality` 事件來標記這種不等式。
+*/
+
+rule VehicleTransmitsLinkageValueToETCentrance:
+  let calcHash = hash(~LinkageValue)
+  in
+  [In(~LinkageValue), TokenIssueComplete(~token, ~nonceETCentrance) ]
+  --[ LinkageValueTransmittedWithIntegrity(~LinkageValue, calcHash) ]->
+  [Out(<~LinkageValue, calcHash>)]
+
+/*
+Step 1c
+*/
+
+rule AttackerUsesToken:
+  [Fr(~token), Fr(~nonce), Fr(~linkageValue)]
+  --[ TokenUsedByAttacker(~token, ~nonce, ~linkageValue) ]->
+  [AttackSucceeded(~token, ~nonce, ~linkageValue)]
+
+/*
+lemma
+模擬攻擊者使用 Token 的行為。
+條件：
+  - 攻擊者需獲得 token、nonce 和 linkageValue。
+效果：
+  - 標記攻擊成功。
+*/
+
+rule ETCentranceReceivesData:
+  [ In(<~LinkageValue, ~calcHash>) ]
+  --[ DataReceivedAtEntrance($ETCentrance, ~LinkageValue, ~calcHash) ]->
+  [ DataReceivedAtEntranceComplete($ETCentrance, ~LinkageValue, ~calcHash) ]
+/*
+  Step 1d
+  功能：
+  接收車輛傳輸的數據，包括 LinkageValue 和 calcHash。
+  標記數據接收完成，方便後續處理。
+*/
+
+rule IntegrityCheckPassed:
+  let computedHash = hash(~LinkageValue)
+  in
+  [ DataReceivedAtEntranceComplete($ETCentrance, ~LinkageValue, ~calcHash)  ]
+  --[ Equal(computedHash,~calcHash), IntegrityPasseded($ETCentrance, ~LinkageValue) ]->
+  [ DataIntegrityConfirmed($ETCentrance, ~LinkageValue) ]
+
+  rule IntegrityCheckFailed:
+  let computedHash = hash(~LinkageValue)
+  in
+  [DataReceivedAtEntranceComplete($ETCentrance, ~LinkageValue, ~calcHash) ]
+  --[ NotEqual(computedHash,~calcHash), IntegrityFaileded($ETCentrance, ~LinkageValue) ]->
+  [ DataIntegrityViolation($ETCentrance, ~LinkageValue) ]
+
+  /*
+  功能：
+  從第一部分的輸出中提取 LinkageValue 和 calcHash。
+  計算 LinkageValue 的哈希值 computedHash，並比較接收到的 ~calcHash。
+  根據比較結果，標記完整性檢查是否通過。
+*/
+
+rule ETCentranceSendsDataToBlockchain:
+  [Fr(~ETCID1),  DataIntegrityConfirmed($ETCentrance, ~LinkageValue) ]
+  --[ BlockchainDataSubmitted(~ETCID1) ]->
+  [BlockchainDataSubmittedComplete($ETCentrance) ]
+/*
+Step 2a
+(有根據前一個步驟)（DataDncryptedComplete)
+ETC Entrance 傳輸 Token、Nonce、ETCID1 和 Linkage Value 至區塊鏈
+*/
+
+rule BlockchainRecordsData:
+  [In(<$ETCentrance, ~token, ~nonceETCentrance, ~ETCID1, ~linkageValue>), BlockchainDataSubmittedComplete($ETCentrance)]
+  --[ BlockchainDataRecorded($ETCentrance, ~token, ~nonceETCentrance, ~ETCID1, ~linkageValue) ]->
+  [BlockchainDataRecordedComplete($ETCentrance, ~token, ~nonceETCentrance, ~ETCID1, ~linkageValue)]
+/*
+Step 2b
+(有根據前一個步驟)（BlockchainDataSubmittedComplete)
+區塊鏈存儲 Token、Nonce、ETCID1 和 Linkage Value
+*/
+
+rule DetectSharedTokenUsage:
+  [ BlockchainDataRecordedComplete($ETCentrance, ~token, ~nonceETCentrance, ~ETCID1, ~linkageValue) ]
+  --[ CheckTokenNonceUniquenessOnBlockchain(~token, ~nonceETCentrance), TokenSharedDetected(~token)]->
+  [ TokenSharedDetectedComplete(~token), PenalizeSharedTokenUsage(~token) ]
+/*
+lemma5
+說明：
+- 在區塊鏈成功存儲 Token 與 Nonce 後，檢查是否有其他 Nonce 使用相同 Token。
+- 若檢測到重複使用，則觸發 `TokenSharedDetected`，並懲罰違規車輛。
+*/
+
+rule PenalizeSharedTokenUsage:
+  [ TokenSharedDetectedComplete(~token) ]
+  --[ PenalizeSharedTokenOwners(~token) ]->
+  [ PenalizeCompleteSharedTokenOwners(~token) ]
+/*
+lemma5
+說明：
+- 對於檢測到共享 Token 的車輛，執行懲罰規則。
+*/
+
+/*
+以下是step3
+*/
+rule VehicleReTransmitsToETCexit:
+  let calcHash = hash(<~token, ~nonceETCentrance, ~LinkageValue>)
+  in
+  [ BlockchainDataRecordedComplete($ETCentrance, ~token, ~nonceETCentrance, ~ETCID1, ~LinkageValue) ]
+  --[ TokenNonceLinkageValueTransmittedWithIntegrity(~token, ~nonceETCentrance, ~LinkageValue, calcHash) ]->
+  [ Out(<~token, ~nonceETCentrance, ~LinkageValue, calcHash>) ]
+/*
+(有根據前一個步驟)（BlockchainDataRecordedComplete)
+車輛
+在確認第二步驟（DataRecordedOnBlockchain）完成後，使用共享密鑰將 Token、Nonce 和 Linkage Value 加密並傳輸至 ETC Exit。
+標記 `TokenNonceLinkageValueReTransmittedToExit` 表示第三步驟的第一階段已完成，並由車輛將加密的數據發送至 ETCexit。
+*/
+
+rule ETCexitReceivesData:
+  [ In(<~token, ~nonceETCentrance, ~LinkageValue, ~calcHash>) ]
+  --[ DataReceivedAtExit($ETCexit, ~LinkageValue, ~calcHash) ]->
+  [ DataReceivedAtExitComplete($ETCexit, ~LinkageValue, ~calcHash) ]
+
+rule ETCexitIntegrityCheckPassed:
+  let computedHash = hash(<~token, ~nonceETCentrance, ~LinkageValue>)
+  in
+  [ In(<~token, ~nonceETCentrance, ~LinkageValue, ~hashValue>) ,DataReceivedAtExitComplete($ETCexit, ~LinkageValue, ~calcHash) ]
+  --[ Equal(computedHash, ~hashValue), IntegrityPassed($ETCexit, ~token, ~nonceETCentrance, ~LinkageValue) ]->
+  [ DataIntegrityConfirmedAtExit(~token, ~nonceETCentrance, ~LinkageValue) ]
+
+  rule ETCexitIntegrityCheckFailed:
+  let computedHash = hash(<~token, ~nonceETCentrance, ~LinkageValue>)
+  in
+  [ In(<~token, ~nonceETCentrance, ~LinkageValue, ~hashValue>),DataReceivedAtExitComplete($ETCexit, ~LinkageValue, ~calcHash)  ]
+  --[ NotEqual(computedHash, ~hashValue), IntegrityFailed($ETCexit, ~token, ~nonceETCentrance, ~LinkageValue), DataIntegrityConfirmedAtExit(~token, ~nonceETCentrance, ~LinkageValue) ]->
+  [ DataIntegrityViolationAtExit($ETCexit, ~token, ~nonceETCentrance, ~LinkageValue) ]
+
+/*
+(有根據前一個步驟)（TokenNonceLinkageValueReTransmittedToExitComplete)
+ETC Exit
+接收到車輛傳輸的加密消息，解密並解析出 Token、Nonce 和 Linkage Value。
+標記 `TokenNonceLinkageValueReceivedByExit` 表示解密已成功完成。
+*/
+
+
+rule ETCexitValidatesTokenAndNonce:
+  [ DataIntegrityConfirmedAtExit(~token, ~nonceETCentrance, ~LinkageValue)  ]
+  --[ TokenAndNonceValidatedByExit(~token, ~nonceETCentrance, ~LinkageValue) ]->
+  [ TokenAndNonceValidatedByExitComplete( ~token, ~nonceETCentrance, ~LinkageValue)]
+/*
+(有根據前一個步驟)（TokenNonceLinkageValueReceivedByExitComplete)
+ETC Exit
+在確認第二步驟數據已記錄在區塊鏈後，驗證接收到的 Token 和 Nonce 是否有效。
+標記 `TokenAndNonceValidatedByExit` 表示驗證成功。
+*/
+
+rule DetectTokenExchange:
+  [ TokenAndNonceValidatedByExitComplete(~token, ~nonceETCentrance, ~LinkageValue),In(~fingerprint)]
+  --[ CheckFingerprintTokenMatchOnBlockchain(~fingerprint, ~token), TokenExchangedDetected(~token)]->
+  [ TokenExchangedDetectedComplete(~token), PenalizeTokenExchange(~token) ]
+/*
+lemma5
+說明：
+- 在出口處 Token 和 Nonce 驗證完成後，檢查指紋是否與該 Token 匹配。
+- 若不匹配，則觸發 `TokenExchangedDetected`，並懲罰相關車輛。
+
+ --[ CheckFingerprintTokenMatchOnBlockchain(~fingerprint, ~token, mismatch) ]->
+*/
+
+rule PenalizeTokenExchange:
+  [  TokenExchangedDetectedComplete (~token) ]
+  --[ PenalizeTokenExchangers(~token) ]->
+  [ PenalizeCompleteTokenExchangers(~token) ]
+/*
+lemma5
+說明：
+- 對於檢測到交換 Token 的車輛，執行懲罰規則。
+*/
+
+
+rule ETCexitForwardsData:
+  [ TokenAndNonceValidatedByExitComplete(~token, ~nonceETCentrance, ~linkageValue) ]
+  -->
+  [ Out($ETCexit), Out(~token), Out(~nonceETCentrance), Out(~linkageValue), DataPreparedForNextStep($ETCexit) ]
+/*
+(有根據前一個步驟)（TokenAndNonceValidatedByExitComplete)
+ETC Exit
+將已驗證的數據傳遞給下一步處理流程（可能是區塊鏈或其他模組）
+標記 `DataPreparedForFinalStep` 表示第三步驟完成
+(這裡目前想不到要放什麼事件)
+*/
+
+
+
+/*
+以下 Step 4
+*/
+rule VehicleGeneratesProof:
+  let zkProof = generateProof(~fingerprint)
+  in
+  [In(~fingerprint), DataPreparedForNextStep($ETCexit)]
+  --[ ProofGenerated($Vehicle, zkProof) ]->
+  [Out(zkProof), ProofGeneratedComplete($Vehicle, zkProof)]
+/*
+車輛生成 zkProof
+*/
+
+
+rule ETCExitReceivesProof:
+  [In(zkProof), ProofGeneratedComplete($Vehicle, zkProof) ]
+  --[ ProofReceived($ETCexit, zkProof)]->
+  [ProofReceivedComplete($ETCexit, zkProof)]
+/*
+ETC Exit 接收 zkProof
+*/
+
+
+rule ETCExitValidatesProofSuccess:
+  [In(~fingerprint), In(zkProof), ProofReceivedComplete($ETCexit, zkProof)]
+  --[ VerifyProof(zkProof, ~fingerprint) ]->
+  [ProofValidated($ETCexit, zkProof), ProofValidationCompleteSuccess($ETCexit, zkProof)]
+/*
+ETC Exit 成功驗證 zkProof
+*/
+
+
+rule ETCExitValidatesProofFailure:
+  [In(~fingerprint), In(zkProof), ProofReceivedComplete($ETCexit, zkProof)]
+  --[ NotVerifyProof(zkProof, ~fingerprint) ]->
+  [ProofRejected($ETCexit, zkProof), ProofValidationCompleteFailure($ETCexit, zkProof)]
+/*
+ETC Exit 驗證 zkProof 失敗
+*/
+
+rule TraceBackOwner:
+  [Fr(~owner), In(~fingerprint), ProofValidationCompleteFailure($ETCexit, zkProof)]
+  --[TraceBackToOwner(~fingerprint, ~owner)]->
+  [TraceBackToOwnerComplete(~fingerprint, ~owner), Penalize(~owner)]
+/*
+在 Proof 驗證失敗後，追溯車主並執行懲罰。
+*/
+
+rule PenalizeOwner:
+  [TraceBackToOwnerComplete(~fingerprint, ~owner)]
+  --[Penalize(~owner)]->
+  [PenalizeComplete(~owner)]
+/*
+完成對未授權車主的懲罰。
+*/
+
+/*
+以下是Step 5
+- ETC Exit 傳輸 Token、Nonce 和 Linkage Value 至區塊鏈
+*/
+rule ETCexitTransmitsToBlockchain:
+[ ProofValidated($ETCexit, zkProof), In(~linkageValue), In(~nonceETCentrance), In(~token)]
+--[DataSentToBlockchainFromExit($ETCexit, ~token, ~nonceETCentrance, ~linkageValue)]->
+[ Out($ETCexit), Out(~token), Out(~nonceETCentrance), Out(~linkageValue),
+DataSentToBlockchainFromExitComplete($ETCexit, ~token, ~nonceETCentrance, ~linkageValue) ]
+/*
+(有根據前前前一個步驟)(ProofValidated)
+功能：
+ - ETC Exit 在完成零知識證明驗證 (ZKProofValidated) 並成功驗證 Token 和 Nonce 後，將這些數據傳輸至區塊鏈。
+條件：
+ - ZKProofValidated 確保零知識證明驗證成功。
+ - TokenAndNonceValidatedByExit 確保 Token 和 Nonce 的有效性已被確認。
+效果：
+ - DataSentToBlockchainFromExit 標記數據已成功傳輸至區塊鏈，供後續流程使用。
+   [ ZKProofValidated($ETCexit, zkProof), TokenAndNonceValidatedByExit(~sessionID, ~token, ~nonceETCentrance, ~linkageValue) ]
+*/
+
+/*
+以下是Step 6a
+區塊鏈檢查 Token 是否對應唯一的 Nonce
+*/
+rule BlockchainValidatesTokenAndNonce:
+  [ In(<~token, ~nonceETCentrance, ~linkageValue>), DataSentToBlockchainFromExitComplete($ETCexit, ~token, ~nonceETCentrance, ~linkageValue), Fr(~uniqueCheckResult) ]
+  --[UniqueCheckPerformed(~token, ~nonceETCentrance, ~uniqueCheckResult)]->
+  [UniqueCheckPerformedComplete(~token, ~nonceETCentrance, ~uniqueCheckResult)]
+/*
+(有根據前前一個步驟)(DataSentToBlockchainFromExitComplete)
+功能：
+ - 區塊鏈根據傳入的 token 和 nonce 檢查是否唯一。
+條件：
+ - DataSentToBlockchainFromExit 確保數據已從 ETC Exit 傳輸到區塊鏈。
+效果：
+ - UniqueCheckPerformed 標記唯一性檢查已完成。
+*/
+
+rule BlockchainStoresLinkageValue:
+  [ UniqueCheckPerformedComplete(~token, ~nonceETCentrance, true), In(<~linkageValue>), Fr(~storageResult) ]
+  --[LinkageValueStoredOnBlockchain(~linkageValue), StorageOperationResult(~storageResult)]->
+  [ LinkageValueStoredOnBlockchainComplete(~linkageValue), StorageOperationResultComplete(~storageResult) ]
+/*
+(有根據前一個步驟)(UniqueCheckPerformedComplete)
+儲存 Linkage Value
+*/
+/*
+功能：
+ - 當檢查 Token 和 Nonce 成功後，儲存 Linkage Value 至區塊鏈。
+條件：
+ - UniqueCheckPerformed(~token, ~nonceETCentrance, true) 表示唯一性檢查成功。
+ - In(<~linkageValue>) 表示收到待儲存的 Linkage Value。
+效果：
+ - LinkageValueStoredOnBlockchain 表示成功儲存。
+ - StorageOperationResult 標記儲存操作結果。
+*/
+
+rule BlockchainRejectsInvalidTokenNonce:
+  [ UniqueCheckPerformedComplete(~token, ~nonceETCentrance, false) ]
+  --[LinkageValueRejectedDueToInvalidTokenNonce(~token, ~nonceETCentrance)]->
+  [ LinkageValueRejectedDueToInvalidTokenNonceComplete(~token, ~nonceETCentrance) ]
+/*
+(有根據前前一個步驟)(UniqueCheckPerformedComplete)
+拒絕儲存 Linkage Value
+*/
+/*
+功能：
+ - 如果檢查 Token 和 Nonce 不唯一，拒絕儲存 Linkage Value。
+條件：
+ - UniqueCheckPerformed(~token, ~nonceETCentrance, false) 表示唯一性檢查失敗。
+效果：
+ - LinkageValueRejectedDueToInvalidTokenNonce 標記該操作被拒絕。
+*/
+
+/*
+以下是Step 6b
+區塊鏈傳輸對應的 ETCID1 給 ETC Exit
+*/
+rule BlockchainGeneratesAndTransmitsETCID:
+  [ LinkageValueStoredOnBlockchainComplete(~linkageValue), In(~ETCID1)]
+  --[ETCIDTransmittedToExit($ETCexit, ~ETCID1)]->
+  [ ETCIDGenerated(~ETCID1), Out($Blockchain), Out(~ETCID1), ETCIDTransmittedToExitComplete($ETCexit, ~ETCID1) ]
+/*
+(有根據前前一個步驟)(LinkageValueStoredOnBlockchainComplete)
+功能：
+ - 在確保 Linkage Value 已成功儲存後，區塊鏈生成並傳輸對應的 ETCID1 給 ETC Exit。
+條件：
+ - LinkageValueStoredOnBlockchain 確認 Linkage Value 已成功儲存。
+ - TokenIssued 確保 token 和 nonce 已被區塊鏈記錄。
+ - Fr(~ETCID1) 生成新的唯一 ETCID1。
+效果：
+ - ETCIDGenerated 標記生成的新 ETCID1。
+ - Out(~ETCID1) 傳輸 ETCID1 給 ETC Exit。
+ - ETCIDTransmittedToExit 標記該 ETCID1 已成功傳輸。
+*/
+
+/*
+以下是Step 7
+ETC Exit 生成 ETCID2 並計算車資
+*/
+rule CalculateDifferenceUsingSubtractFunction:
+  let difference = subtract(~ETCID2, ~ETCID1)
+  in
+  [ In(~ETCID1), Fr(~ETCID2), ETCIDTransmittedToExitComplete($ETCexit, ~ETCID1) ]
+  --[DifferenceCalculated($ETCexit, difference)]->
+  [ DifferenceCalculatedComplete($ETCexit, difference), Out(difference) ]
+/*
+(有根據前前一個步驟)(ETCIDTransmittedToExitComplete)
+功能：
+ - 使用自定义函数 `subtract` 计算 `ETCID2 - ETCID1` 的差值。
+条件：
+ - `ETCID1` 来自区块链输入。
+ - `ETCID2` 由 `ETCexit` 生成。
+效果：
+ - 记录差值并输出。
+*/
+
+
+rule CalculateFareUsingFunction:
+  let fare = calculateFare(~difference, ~rate)
+  in
+  [ DifferenceCalculatedComplete($ETCexit, ~difference), Fr(~rate) ]
+  --[ FinalFareCalculated($ETCexit, fare)]->
+  [ FinalFareCalculatedComplete($ETCexit, fare), Out(fare) ]
+/*
+(有根據前前一個步驟)(DifferenceCalculatedComplete)
+功能：
+ - 使用自定义函数 `calculateFare` 计算最终车资。
+条件：
+ - 差值已通过 `DifferenceCalculated` 规则计算完成。
+ - 费率由 `ETCexit` 生成。
+效果：
+ - 记录和输出最终车资。
+*/
+
+
+/*
+Step 8: 傳送車資給車輛
+*/
+rule TransmitFareToVehicle:
+  [ FinalFareCalculatedComplete($ETCexit, ~fare) ]
+  --[FareTransmittedToVehicle($ETCexit, $Vehicle, ~fare)]->
+  [ FareTransmittedToVehicleComplete($ETCexit, $Vehicle, ~fare), Out(~fare) ]
+/*
+(有根據前前一個步驟)(FinalFareCalculatedComplete)
+功能：
+ - 將第七步驟計算出的車資 `fare` 傳輸給車輛。
+條件：
+ - `FinalFareCalculated` 確認車資計算已完成。
+效果：
+ - 標記車資已成功傳輸給車輛。
+ - 輸出車資 `fare`。
+*/
+
+
+/*
+Step 9: 車輛將車資傳送給支付系統進行付款
+*/
+rule VehicleSendsFareToPaymentSystem:
+  [ FareTransmittedToVehicleComplete($ETCexit, $Vehicle, ~fare) ]
+  --[FareSentToPaymentSystem($Vehicle, $PaymentSystem, ~fare)]->
+  [ FareSentToPaymentSystemComplete($Vehicle, $PaymentSystem, ~fare), Out(~fare) ]
+/*
+(有根據前前一個步驟)(FareTransmittedToVehicleComplete)
+功能：
+ - 車輛將接收到的車資 `fare` 傳送給支付系統進行付款。
+條件：
+ - `FareTransmittedToVehicle` 確認車資已從 ETC Exit 傳輸至車輛。
+效果：
+ - 標記車資已傳送至支付系統。
+ - 輸出車資 `fare`。
+*/
+
+lemma Token_Anonymity:
+  "∀ #i token nonceETCentrance.
+   (TokenIssued(token, nonceETCentrance) @ #i ∧ !KU(token) @ #i ∧ !KU(nonceETCentrance) @ #i) ⇒
+   (∃ #k. (TokenIssued(token, nonceETCentrance) @ #k) ∧ (#k < #i))"
+/*
+ TokenIssued(token, nonceETCentrance)
+檢查：攻擊者能否從 Token 推導車輛識別碼。
+- `TokenIssued` 表示令牌已被發行。
+- `K(token)` 模擬攻擊者獲取令牌的情境。
+目標：無論攻擊者如何操作，都無法從 Token 獲取車輛的身份資訊。
+*/
+
+lemma Authentication_Validity:
+  "∀ #i fingerprint nonce zkProof token.
+   (ProofGenerated(fingerprint, zkProof) @ #i ∧
+    VerifyProof(zkProof, fingerprint) @ #i ∧
+    TokenIssued(token, nonce) @ #i ∧
+    Nonce(nonce) @ #i ∧
+    !KU(fingerprint) @ #i ∧
+    !KU(zkProof) @ #i) ⇒
+    (∃ #k. (VerifyProof(zkProof, fingerprint) @ #k ∧ #k < #i))"
+/*
+目標：
+ - 驗證 zkProof 在成功驗證後，整個過程是否安全且不可被攻擊者偽造。
+ - 核心條件：
+   1. zkProof 與 fingerprint 需匹配。
+   2. fingerprint 和 zkProof 的資訊需保持私密性。
+   3. 在某一時間點 (#k) 可以回溯驗證。
+*/
+
+
+
+lemma Unauthorized_Vehicle_Detection:
+  "∀ #i fingerprint nonce zkProof token.
+   (ProofGenerated(fingerprint, zkProof) @ #i ∧
+    NotVerifyProof(zkProof, fingerprint) @ #i ∧
+    TokenIssued(token, nonce) @ #i ∧
+    Nonce(nonce) @ #i ∧
+    KU(fingerprint) @ #i) ⇒
+    (∃ owner. TraceBackToOwner(fingerprint, owner) @ #i ∧ Penalize(owner) @ #i)"
+/*
+目標：
+ - 確保在 zkProof 無法通過驗證時，系統能夠追蹤車輛的真實身份並進行懲罰。
+ - 核心條件：
+   1. fingerprint 已知，但 zkProof 無法驗證。
+   2. 系統應追溯車主，並對未授權行為進行處理。
+*/
+
+
+lemma Integrity_Preservation_For_V2X:
+  "∀ #i #j token nonceETCentrance LinkageValue hashValue.
+     (LinkageValueTransmittedWithIntegrity(LinkageValue, hashValue) @ #i ∧
+      DataIntegrityConfirmedAtExit(token, nonceETCentrance, LinkageValue) @ #j ∧
+      !KU(LinkageValue) @ #i ∧
+      !KU(hashValue) @ #i ∧
+      !KU(token) @ #j ∧
+      !KU(nonceETCentrance) @ #j) ⇒
+     (#i < #j)"
+
+/*
+驗證車聯網過程中數據未被篡改，並且消息傳輸順序正確
+*/
+
+
+lemma Data_Confidentiality:
+  "∀ #i token nonce linkageValue fingerprint zkProof.
+     (TokenIssued(token, nonce) @ #i ∧
+      LinkageValueTransmittedWithIntegrity(linkageValue, hash(linkageValue)) @ #i ∧
+      ProofGenerated(fingerprint, zkProof) @ #i ∧
+      !KU(token) @ #i ∧
+      !KU(nonce) @ #i ∧
+      !KU(linkageValue) @ #i) ⇒
+     (¬(∃ #j. (#i < #j ∧ TokenUsedByAttacker(token, nonce, linkageValue) @ #j)))"
+
+
+/*
+lemma5
+*/
+lemma Prevent_Shared_Token_Usage:
+  "∀ #i token nonce1 nonce2.
+    (TokenIssued(token, nonce1) @ #i ∧
+     TokenIssued(token, nonce2) @ #i ∧
+     NonceInequality(nonce1, nonce2) @ #i ∧
+     !KU(token) @ #i ∧
+     !KU(nonce1) @ #i ∧
+     !KU(nonce2) @ #i) ⇒
+    (¬(∃ #j. (#i < #j ∧ TokenSharedDetected(token) @ #j)))"
+/*
+說明：
+- 確保每個 token 僅能與唯一的 nonce 綁定。
+- 若系統檢測到同一 token 與多個 nonce 相關聯，則觸發 `TokenSharedDetected`。
+*/
+
+
+lemma Prevent_Token_Exchange:
+  "∀ #i token fingerprint1 fingerprint2 zkProof1 zkProof2.
+    (ProofGenerated(fingerprint1, zkProof1) @ #i ∧
+     ProofGenerated(fingerprint2, zkProof2) @ #i ∧
+     VerifyProof(zkProof1, fingerprint2) @ #i ∧
+     !KU(fingerprint1) @ #i ∧
+     !KU(fingerprint2) @ #i ∧
+     !KU(token) @ #i) ⇒
+    (¬(∃ #j. (#i < #j ∧ TokenExchangedDetected(token) @ #j)))"
+/*
+說明：
+- 確保 token 與車輛的動態指紋唯一綁定。
+- 若驗證 zkProof 時發現 token 與非預期的動態指紋綁定，則觸發 `TokenExchangedDetected`。
+*/
+
+
+
+end
